@@ -1,0 +1,402 @@
+
+## 准备工作
+服务器如下:
+
+10.10.10.2 （外网：xxx.xxx.xxx.xxx） (master1)
+
+10.10.10.3 （外网：xxx.xxx.xxx.xxx） (master2)
+
+10.10.10.4  (外网：xxx.xxx.xxx.xxx) (master3) 
+
+10.10.10.5 (node1)
+
+10.10.10.6 (node2)
+
+10.10.10.7 (node3)
+
+10.10.10.8 (db1)
+
+10.10.10.9 (db2)
+
+10.10.10.10 (db3)
+
+## 修改hostname和hosts
+
+登录到各服务器分别设置对应的hostname
+
+```
+ $ hostnamectl set-hostname xxxx
+```
+
+
+*** 分别修改每台机器的/etc/hosts 内容如下 ***
+
+echo -ne "
+192.168.1.80 master1
+192.168.1.81 master2
+192.168.1.82 master3
+192.168.1.90 node1
+192.168.1.91 node2
+192.168.1.92 node3
+192.168.1.93 db1
+192.168.1.94 db2
+192.168.1.95 db3
+69.172.93.86  harbor.boyi.com
+" >> /etc/hosts
+
+
+## 实现master对node的免密登录
+
+*** 分别在每台服务器上创建dev用户和设置密码 ***
+
+```
+$ sudo useradd -d /home/dev -m dev
+$ sudo passwd dev
+$ echo "dev ALL = (root) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/dev
+$ sudo chmod 0440 /etc/sudoers.d/dev
+```
+```
+
+```
+
+*** 以dev身份登录到master节点上 ***
+
+```
+$ ssh-keygen (一直按回车)
+$ ssh-copy-id dev@master1
+$ ssh-copy-id dev@master2
+$ ssh-copy-id dev@master3
+$ ssh-copy-id dev@node1
+$ ssh-copy-id dev@node2
+$ ssh-copy-id dev@node3
+$ ssh-copy-id dev@db1 
+$ ssh-copy-id dev@db2
+$ ssh-copy-id dev@db3  
+```
+
+
+## openshift 安装
+
+
+*** 环境安装(master1上操作) ***
+wget https://releases.ansible.com/ansible/rpm/release/epel-7-x86_64/ansible-2.6.5-1.el7.ans.noarch.rpm
+yum install ansible-2.6.5-1.el7.ans.noarch.rpm
+
+```
+$ sudo yum install ansible -y
+$ vi /etc/ansible/hosts
+[OSEv3:children]
+masters
+etcd
+nodes
+
+[OSEv3:vars]
+ansible_user=dev
+ansible_become=yes
+
+openshift_master_cluster_hostname=192.168.1.80
+openshift_master_cluster_public_hostname=192.168.1.80
+
+openshift_deployment_type=origin
+
+openshift_master_identity_providers=[{'name': 'htpasswd_auth', 'login': 'true', 'challenge': 'true', 'kind': 'HTPasswdPasswordIdentityProvider'}]
+
+openshift_disable_check=disk_availability,docker_image_availability,docker_storage,memory_availability
+
+# openshift_node_kubelet_args={'pods-per-core': ['10'], 'max-pods': ['250'], 'image-gc-high-threshold': ['90'], 'image-gc-low-threshold': ['80']}
+
+# enable ntp on masters to ensure proper failover
+openshift_clock_enabled=true
+
+openshift_docker_selinux_enabled=False
+
+[masters]
+192.168.1.80
+192.168.1.81
+192.168.1.82
+
+[etcd]
+192.168.1.80
+192.168.1.81
+192.168.1.82
+
+[nodes]
+192.168.1.80 openshift_node_group_name='node-config-master'
+192.168.1.81 openshift_node_group_name='node-config-master'
+192.168.1.82 openshift_node_group_name='node-config-master'
+192.168.1.90 openshift_node_group_name='node-config-compute'
+192.168.1.91 openshift_node_group_name='node-config-compute'
+192.168.1.92 openshift_node_group_name='node-config-compute'
+192.168.1.93 openshift_node_group_name='node-config-infra'
+192.168.1.94 openshift_node_group_name='node-config-infra'
+192.168.1.95 openshift_node_group_name='node-config-infra'
+
+```
+
+*** 安装 ***
+
+可提前安装必备组件
+
+3.11 
+all:
+/usr/bin/python /bin/yum -d 2 -y install origin-3.11* origin-node-3.11* origin-clients-3.11* conntrack-tools origin-hyperkube-3.11*
+docker pull docker.io/openshift/origin-pod:v3.11
+master:
+docker pull quay.io/coreos/etcd:v3.2.22
+docker.io/openshift/origin-control-plane:v3.11
+
+
+master:
+docker pull harbor.boyi.com/library/origin-control-plane:v3.11.0
+docker tag  harbor.boyi.com/library/origin-control-plane:v3.11.0 docker.io/openshift/origin-control-plane:v3.11.0
+all:
+sudo docker pull harbor.boyi.com/library/cluster-monitoring-operator:v0.1.1
+sudo docker tag  harbor.boyi.com/library/cluster-monitoring-operator:v0.1.1 quay.io/coreos/cluster-monitoring-operator:v0.1.1
+
+
+sudo docker pull harbor.boyi.com/library/origin-node:v3.11.0
+sudo docker tag  harbor.boyi.com/library/origin-node:v3.11.0 docker.io/openshift/origin-node:v3.11.0
+sudo docker pull harbor.boyi.com/library/origin-pod:v3.11.0
+sudo docker tag  harbor.boyi.com/library/origin-pod:v3.11.0 docker.io/openshift/origin-pod:v3.11.0
+
+compute node:
+sudo docker pull harbor.boyi.com/library/local-storage-provisioner:v3.11
+sudo docker tag  harbor.boyi.com/library/local-storage-provisioner:v3.11 registry.redhat.io/openshift3/local-storage-provisioner:v3.11
+【阿里云镜像加速
+sudo tee /etc/docker/daemon.json <<-'EOF'
+{
+  "registry-mirrors": ["https://lpyvfwlx.mirror.aliyuncs.com"]
+}
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+】
+
+遇到问题
+1）报错-1
+fatal: [rhel7-5-a]: FAILED! => {"msg": "last_checked_host: rhel7-5-a, last_checked_var: openshift_master_manage_htpasswd;openshift_master_identity_providers contains a provider of kind==HTPasswdPasswordIdentityProvider and filename is set. Please migrate your htpasswd files to /etc/origin/master/htpasswd and update your existing master configs, and remove the filename keybefore proceeding."}
+
+原因分析：新版本取消了 openshift_master_identity_providers 中 “finename” 关键字。
+解决办法：删除 “filename” 键值对。
+注：集群部署成功后，会在 /etc/origin/master 下创建 htpasswd 空文件，用户可进入该目录通过 htpasswd -c htpasswd username password 方式创建账户，用于集群登录。
+2）报错-2
+Failed : Retrying : Wait for ServiceMonitor CRD to be created
+
+原因分析：ifcfg-eth0 中为 NM_CONTROLLED=no。
+解决办法：更改为 NM_CONTROLLED=yes，并重启系统。
+3）报错-3
+Console install failed
+
+原因分析：v3.9 以前 console 是以服务在宿主机上运行，v3.9 及以后是以 pod 运行的，默认情况下会将 pod 调度到带有 master=true 标签的 node 上，如果没有这样的 node，则 console 创建失败。
+解决方案：在 [nodes] entry 中添加 “openshift_node_group_name='node-config-master'” 或 “openshift_node_group_name='node-config-master-infra'”
+4）错误-4
+error:https://docker-registry.default.svc:5000 dial tcp 172.30.144.123:5000: getsockopt: no route to host
+
+原因分析：找不到 route。
+解决方案：在 /etc/sysconfig/docker 文件 OPTIONS 字段后面添加 “--insecure-registry=172.30.0.0/16”，或者在文件末尾添加 “INSECURE_REGISTRY='--insecure-registry 172.30.0.0/16'”，重启 docker。
+
+如果遇到service monitor CRD创建失败则：
+ansible all -m shell -a "cp /etc/resolv.conf /etc/origin/node/resolv.conf"
+
+while true; do x=`grep 114.114.114.114 /etc/resolv.conf` ;if [ -z "$x" ] ;then echo "nameserver 114.114.114.114" >> /etc/resolv.conf; echo done; fi; sleep 1; done
+
+```
+注意：最新脚本请移步https://github.com/openshift/openshift-ansible/releases查看
+$sudo wget https://github.com/openshift/openshift-ansible/archive/openshift-ansible-3.11.91-1.tar.gz
+$ sudo tar -xvf openshift-ansible-3.11.91-1.tar.gz
+$ cd openshift-ansible-openshift-ansible-3.11.91-1
+$ ansible-playbook playbooks/prerequisites.yml
+$ ansible-playbook playbooks/deploy_cluster.yml
+$ (卸载： ansible-playbook playbooks/adhoc/uninstall.yml)
+```
+
+
+*** 配置 ***
+
+```
+//设置openshift密码（每个master上都有执行）
+$ sudo htpasswd /etc/origin/master/htpasswd admin
+// 将admin设置为管理员权限
+$ sudo oadm policy add-cluster-role-to-user cluster-admin admin
+
+打开 openshift  
+
+https://ip:8443
+
+## openshift里新建三个project
+
+1. qiyunxin 服务本身
+
+2. databases 服务的数据库
+
+3. im 即时通讯服务
+
+
+设置镜像pull密钥
+
+oc create secret docker-registry regsecret --docker-server=harbor.boyi.com --docker-username=admin --docker-password=Boyi_harbor123 --docker-email=admin@123.123 -n qiyunxin
+oc create secret docker-registry regsecret --docker-server=harbor.boyi.com --docker-username=admin --docker-password=Boyi_harbor123 --docker-email=admin@123.123 -n databases
+oc create secret docker-registry regsecret --docker-server=harbor.boyi.com --docker-username=admin --docker-password=Boyi_harbor123 --docker-email=admin@123.123 -n im
+
+
+
+## 安装部署工具helm
+
+$ cd helm
+$ export TILLER_NAMESPACE=default
+$ oc process -f tiller-template.yaml  -p TILLER_NAMESPACE="default" | oc create -f -
+```
+
+## 部署微服务
+
+*** 安装本地存储卷 ***
+
+fdisk /dev/sdb
+  n
+  e (初次，扩展分区)
+  l 
+  +21G
+  w
+for i in {5..18}; do sudo mkfs.xfs /dev/sdb$i; done
+for i in {5..18}; do sudo mkdir -p /mnt/local-storage/ssd/disk$i;done
+for i in {5..18}; do sudo mount /dev/sdb$i /mnt/local-storage/ssd/disk$i;done
+vi /etc/fstab
+echo -ne "
+/dev/sdb5 /mnt/local-storage/ssd/disk5 xfs defaults 0 0
+/dev/sdb6 /mnt/local-storage/ssd/disk6 xfs defaults 0 0
+/dev/sdb7 /mnt/local-storage/ssd/disk7 xfs defaults 0 0
+/dev/sdb8 /mnt/local-storage/ssd/disk8 xfs defaults 0 0
+/dev/sdb9 /mnt/local-storage/ssd/disk9 xfs defaults 0 0
+/dev/sdb10 /mnt/local-storage/ssd/disk10 xfs defaults 0 0
+/dev/sdb11 /mnt/local-storage/ssd/disk11 xfs defaults 0 0
+/dev/sdb12 /mnt/local-storage/ssd/disk12 xfs defaults 0 0
+/dev/sdb13 /mnt/local-storage/ssd/disk13 xfs defaults 0 0
+" >> /etc/fstab
+
+
+https://docs.openshift.com/container-platform/3.11/install_config/configuring_local.html
+all node:
+sudo /bin/bash -c "echo -ne '{
+  \"insecure-registries\" : [\"harbor.boyi.com\"]
+}' > /etc/docker/daemon.json"
+重启服务
+systemctl restart docker
+每台都设置一下 hosts  14.18.253.117  harbor.boyi.com
+echo "69.172.93.86 harbor.boyi.com" >> /etc/hosts
+
+all node:
+docker pull harbor.boyi.com/library/local-storage-provisioner:v3.11
+docker tag harbor.boyi.com/library/local-storage-provisioner:v3.11 registry.redhat.io/openshift3/local-storage-provisioner:v3.11
+
+
+
+```
+// 安装项目环境
+$ oc create -f project-config.yaml -n  qiyunxin
+// 进入服务部署目录
+$ cd ./storageclass
+// 将Makefile里的extIP改成自己master的IP（随便哪个master都可以）
+// 执行安装命令 (xxx为服务名字) （对应的卸载命令为make xxxx-uninstall,正式运行后有数据后不要随便执行uninstall，uninstall会将数据一起删掉）
+$ make xxx-install 
+
+```
+
+==================================================================================================================
+
+*** 遇到的问题 ***
+1、安装过程如果报HTPasswdPasswordIdentityProvider的filename找不到，请将filename删除，然后重装, 如下：
+	sudo vi /etc/ansible/hosts
+	将openshift_master_identity_providers=[{'name': 'htpasswd_auth', 'login': 'true', 'challenge': 'true', 'kind': 'HTPasswdPasswordIdentityProvider','filename': '/etc/origin/master/htpasswd'}]
+	换成：openshift_master_identity_providers=[{'name': 'htpasswd_auth', 'login': 'true', 'challenge': 'true', 'kind': 'HTPasswdPasswordIdentityProvider'}]
+	
+2、openshift登录出错：在每台mastr上 /etc/origin/master/master-config.yaml的 corsAllowedOrigins 属性没有把其他几台机器的域名（- (?i)//master2(:|\z)）和- (?i)//master3(:|\z)加进去，如下：
+	corsAllowedOrigins:
+	- (?i)//127\.0\.0\.1(:|\z)
+	- (?i)//localhost(:|\z)
+	- (?i)//10\.10\.10\.11(:|\z)
+	- (?i)//14\.18\.253\.71(:|\z)
+	- (?i)//master1(:|\z)
+	- (?i)//master2(:|\z)
+	- (?i)//master3(:|\z)
+	- (?i)//kubernetes\.default(:|\z)
+	然后重启docker：systemctl restart docker
+```
+
+## 设置路由
+1、到web cosole的qiyunxin或是其他目录找到kong-dashboard这个pod：
+	1.1、Applications->Routes->Create Route
+	 Name: kongui 
+	 Host: 外网ip或域名，一定是router所在那几台服务器的ip（任意1台），如果不知道router的ip，请到default目录下找到router点击进入可以看到对应的pod，点击pod查看详情可看到ip；例如：192.168.1.18，kongui.192.168.1.17.nip.io
+	 Path: /
+	 Server: kong-dashboard-service
+	 Target Port: 8080->8080(TCP)
+	 点击保存后连接到http://kongui.192.168.1.18.nip.io/#/config，设定KongController Url: http://kong-controller.qiyunxin.svc.cluster.local:8001之后可以通过Add Api增加微服务接口
+	1.2、切找到databases目录下
+	     oc get pod（查看所有pod）找到kong的数据库名称：postgresqlkong-9d4d96d69-dvgs6
+		 oc port-forward postgresqlkong-9d4d96d69-dvgs6 5432 映射到本地，然后用Navicat连接kong数据库，在sampledb中导入文件夹中的apis.sql执行
+		 deploy或删除kong的pod重启api服务
+    ***以上两个步骤2选1
+2、到web cosole的qiyunxin目录找到kong-controller这个pod:
+    2.1、Applications->Routes->Create Route
+	  Name: kongapi
+	  Host: 外网ip或是域名，还是router下的ip，例如：192.168.1.18，kongapi.173.248.224.112.nip.io
+	  Server：kong-controller
+	  Target Port: 8000->8000(TCP)
+	  点击保存，这样就获得对外连接app的url了，把这个url给前端连接服务器
+	
+## 增加app id
+1、redpacket、paybusapi、payv2api、purseapi这4个数据库新增数据
+   以redpacket为例，先生成个随机码：ctPSbyYA9oPxIlA0
+   切换到databases目录，$ oc get pod 获取 mysqlredpacket-76b66767cb-cwbtc ,然后$ oc port-forward mysqlredpacket-76b66767cb-cwbtc 33306映射到本地
+   开启Navicat连接到sampledb->qyx_app增加一条数据：insert into qyx_app (`appid`, `app_key`, `app_name`, `app_desc`, `status`, `json`, `flag`) values ('qiyunxin', 'ctPSbyYA9oPxIlA0', 'qiyunxin', 'qiyunxin', 1, '', '');
+   *** app_name与app_des就是app名称，app_key就是随机码， status保持1， json、flag不要为null设置为空字串
+   
+## 调试接口
+1、talkserver加key.data重启，查看talkserver在哪台服务器上，如在node2上则/mnt/local-storage/ssd/disk2加上key.data文件，然后deploy重启talkserver
+2、修改neo4j密码，在openshift上切换到databases目录下, oc get pod 获取到neo4jrelationapi-6498cb5859-ls7ls
+   $ oc port-forward neo4jrelationapi-6498cb5859-ls7ls 7474
+   $ oc port-forward neo4jrelationapi-6498cb5859-ls7ls 7687
+   这两个命令用不同的cmd开，映射好后连接到http://127.0.0.1:7474  username:neo4j   password:neo4j   修改密码为：123456
+   *** 或者进入/user/bin，./cypher-shell进入neo4j操作，username:neo4j  password:123456 , 修改密码：CALL dbms.changePassword('123456')
+4、正式环境因为防打原因，talkserver（也就是前端的socket连接地址）直接写死talkserver的ip或域名，如果前端不方便改，后端在talkinitapi的config/prod.json的server_ip_get_close去掉
+
+##  部署代码
+1、修改完代码git-commit写好说明提交，测试可以创建分支提交到分支上，commit完成后执行push
+2、代码提交完成后打开Jenkins  
+    2.1、Jenkins地址：http://173.248.224.88:8800 username: qiyunxin    password: Aiti1234 
+	2.2、登录到Jenkins后，找到要更新的api，例如：talkinitapi；
+	2.3、进入对应api详情后，左上方找到“配置”选项，配置设置：Advanced Project Options -> Pipeline:
+	     Definition : Pipeline script from SCM
+		 SCM ： Git
+		 Repositories : api的git地址，例如：http://gitlab.qiyunxin.com/qyxteam/talkinitapi.git
+		 Branch Specifier (blank for 'any')： */yehua       //***此处最重要，以上三个参数无须改动，此处主要对应分支，如果你提交的是master分支那就填*/master
+	2.4、保存后返回api详情
+	2.5、点击“Build with Parameters”选项进行构建，点击“开始构建”后返回api详情等待构建完成
+	2.6、构建完成后，看看构建是否有问题，有问题后点击对应的查看logs找出bug，没问题后也Push image的logs找到构建好的镜像文件url，例如：+ docker push hub2.qiyunxin.com/devs/talkinitapi:20181029-6
+	2.7、打开opneshift切换到qiyunxin找到对应的api，如talkinitapi，点击最右边的“┇”Edit, 将构建好的镜像url(hub2.qiyunxin.com/devs/talkinitapi:20181029-6)替换原来的Image Name的url，然后保存
+
+
+
+##  添加镜像地址
+1、$ sudo vi /etc/docker/daemon.json
+{
+  "insecure-registries" : ["harbor.boyi.com"]
+}	
+重启服务
+systemctl restart docker
+
+##  添加compute节点，解决无法分配存储的问题
+oc edit node master1
+添加
+node-role.kubernetes.io/compute: "true"
+
+##
+taskcure pod报错
+Liveness probe failed: Get http://10.131.0.13:8080/healthcheck: dial tcp 10.131.0.13:8080: getsockopt: connection refused
+在openshift页面依次点击
+Applications--Deployments--xxx--Actions--Edit Health Checks--Remove
+ 
+
+
+
+`
